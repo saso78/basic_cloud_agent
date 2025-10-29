@@ -2,20 +2,97 @@ import requests
 import os
 import time
 import subprocess
-import requests
+import json
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
 api_key = os.getenv("OPENROUTER_API_KEY")
 
 MODELS = [
+    "google/gemini-2.0-flash-exp:free",
     "mistralai/mistral-7b-instruct",
     "meta-llama/llama-3-8b-instruct",
-    "nousresearch/hermes-2-pro-mistral-7b",
-    "google/gemini-2.0-flash-exp:free"
 ]
 
+HISTORY_FILE = "chat_history.json"
+MAX_HISTORY_MESSAGES = 10  # Keep last 5 exchanges (user + assistant = 10 messages)
+
+class ConversationMemory:
+    def __init__(self):
+        self.messages = []
+        self.session_start = datetime.now().isoformat()
+        self.load_history()
+    
+    def load_history(self):
+        """Load previous conversation from file."""
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # Load only recent messages
+                    if 'messages' in data:
+                        self.messages = data['messages'][-MAX_HISTORY_MESSAGES:]
+                        print(f"📚 Loaded {len(self.messages)} messages from previous session")
+            except Exception as e:
+                print(f"⚠️ Could not load history: {e}")
+    
+    def save_history(self):
+        """Save conversation to file."""
+        try:
+            data = {
+                'session_start': self.session_start,
+                'last_updated': datetime.now().isoformat(),
+                'messages': self.messages
+            }
+            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"⚠️ Could not save history: {e}")
+    
+    def add_message(self, role, content):
+        """Add a message to conversation history."""
+        self.messages.append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Keep only last N messages
+        if len(self.messages) > MAX_HISTORY_MESSAGES:
+            self.messages = self.messages[-MAX_HISTORY_MESSAGES:]
+    
+    def get_context_messages(self):
+        """Get messages formatted for API (without timestamps)."""
+        return [{"role": m["role"], "content": m["content"]} for m in self.messages]
+    
+    def clear(self):
+        """Clear current session memory."""
+        self.messages = []
+        print("🧹 Memory cleared!")
+    
+    def show_history(self):
+        """Display conversation history."""
+        if not self.messages:
+            return "📭 No conversation history yet."
+        
+        output = "📜 Conversation History:\n" + "="*50 + "\n"
+        for i, msg in enumerate(self.messages, 1):
+            role_emoji = "👤" if msg["role"] == "user" else "🤖"
+            output += f"\n{role_emoji} {msg['role'].upper()}: {msg['content'][:100]}...\n"
+        return output
+
+memory = ConversationMemory()
+
 def ask_agent(prompt, api_key):
+    """Ask AI with conversation context."""
+    # Add system message + conversation history + new prompt
+    messages = [
+        {"role": "system", "content": "You are a helpful AI assistant. Always reply in complete sentences."}
+    ]
+    messages.extend(memory.get_context_messages())
+    messages.append({"role": "user", "content": prompt.strip()})
+    
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -29,10 +106,7 @@ def ask_agent(prompt, api_key):
                 headers=headers,
                 json={
                     "model": model,
-                    "messages": [
-                        {"role": "system", "content": "You are a helpful AI assistant. Always reply in complete sentences."},
-                        {"role": "user", "content": prompt.strip()},
-                    ],
+                    "messages": messages,
                     "max_tokens": 500,
                     "temperature": 0.7
                 },
@@ -44,12 +118,15 @@ def ask_agent(prompt, api_key):
                 if "choices" in data and len(data["choices"]) > 0:
                     content = data["choices"][0]["message"].get("content", "").strip()
                     if content:
+                        # Store in memory
+                        memory.add_message("user", prompt.strip())
+                        memory.add_message("assistant", content)
                         return f"(🧠 Model: {model})\n{content}"
                     else:
                         print(f"⚠️ Empty response from {model}, trying next...")
                         continue
                 else:
-                    print(f"⚠️ Unexpected format from {model}: {data}")
+                    print(f"⚠️ Unexpected format from {model}")
                     continue
 
             elif response.status_code == 429:
@@ -57,7 +134,7 @@ def ask_agent(prompt, api_key):
                 time.sleep(2)
                 continue
             else:
-                print(f"❌ API Error {response.status_code}: {response.text}")
+                print(f"❌ API Error {response.status_code}: {response.text[:200]}")
                 continue
 
         except requests.exceptions.Timeout:
@@ -68,8 +145,6 @@ def ask_agent(prompt, api_key):
             continue
 
     return "❌ All models are currently unavailable. Please try again later."
-
-# ---------- COMMAND EXECUTION LAYER ----------
 
 def run_local_command(command):
     """Safely execute small local commands."""
@@ -83,7 +158,7 @@ def read_file(path):
     """Read contents of a local file (text only)."""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return f.read()[:1000]  # limit to 1k chars for safety
+            return f.read()[:1000]
     except Exception as e:
         return f"❌ File read error: {e}"
 
@@ -109,45 +184,58 @@ def handle_command(user_input):
     elif user_input.startswith("/run "):
         cmd = user_input.split(" ", 1)[1].strip()
         return run_local_command(cmd)
+    elif user_input == "/history":
+        return memory.show_history()
+    elif user_input == "/clear":
+        memory.clear()
+        return "✅ Conversation memory cleared"
     elif user_input == "/help":
         return (
             "🧩 Commands available:\n"
             "/read <path>   – Read local file\n"
             "/fetch <url>   – Fetch content from the web\n"
             "/run <cmd>     – Run simple local command\n"
-            "/quit or exit  – Exit the agent\n"
+            "/history       – Show conversation history\n"
+            "/clear         – Clear conversation memory\n"
+            "/quit or exit  – Exit and save\n"
         )
     else:
         return None
 
-# ---------- MAIN LOOP ----------
-
 def main():
-    print("🤖 Task Agent + Tools Enabled (Cloud Mode)")
-    print("✅ Commands: /help /read /fetch /run\n")
+    print("🤖 Task Agent + Memory + Tools (Cloud Mode)")
+    print("✅ Commands: /help /history /clear /read /fetch /run\n")
 
     if not api_key:
         print("❌ Missing OPENROUTER_API_KEY in your .env file")
         return
 
-    while True:
-        user_input = input("\n🧩 > ").strip()
-        if user_input.lower() in ["exit", "quit"]:
-            print("👋 Goodbye!")
-            break
-        if not user_input:
-            continue
+    try:
+        while True:
+            user_input = input("\n🧩 > ").strip()
+            if user_input.lower() in ["exit", "quit", "/quit"]:
+                print("\n💾 Saving conversation...")
+                memory.save_history()
+                print("👋 Goodbye!")
+                break
+            if not user_input:
+                continue
 
-        # Local commands first
-        local_response = handle_command(user_input)
-        if local_response:
-            print(f"\n💻 {local_response}\n")
-            continue
+            # Local commands first
+            local_response = handle_command(user_input)
+            if local_response:
+                print(f"\n💻 {local_response}\n")
+                continue
 
-        # Otherwise, ask the AI
-        print("\n⏳ Thinking...\n")
-        answer = ask_agent(user_input, api_key)
-        print(f"\n💡 {answer}\n")
+            # Otherwise, ask the AI
+            print("\n⏳ Thinking...\n")
+            answer = ask_agent(user_input, api_key)
+            print(f"\n💡 {answer}\n")
+    
+    except KeyboardInterrupt:
+        print("\n\n💾 Saving conversation...")
+        memory.save_history()
+        print("👋 Goodbye!")
 
 if __name__ == "__main__":
     main()

@@ -42,3 +42,8 @@ Thumbs.db
 
 *.bak
 *.tmp
+
+# Chat History Files
+chat_history.json
+chat_history_*.json
+
