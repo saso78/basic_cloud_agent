@@ -3,6 +3,7 @@ import os
 import time
 import subprocess
 import json
+import sys
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -17,6 +18,20 @@ MODELS = [
 
 HISTORY_FILE = "chat_history.json"
 MAX_HISTORY_MESSAGES = 10  # Keep last 5 exchanges (user + assistant = 10 messages)
+
+# System prompt presets
+SYSTEM_PROMPTS = {
+    "default": "You are a helpful AI assistant. Always reply in complete sentences.",
+    "concise": "You are a helpful AI assistant. Be extremely concise and direct. Answer in 1-2 sentences when possible.",
+    "expert": "You are an expert technical advisor. Provide detailed, accurate explanations with examples.",
+    "creative": "You are a creative writing assistant. Be imaginative, descriptive, and engaging in your responses.",
+    "teacher": "You are a patient teacher. Explain concepts clearly with analogies and examples. Break down complex topics.",
+    "coder": "You are an expert programmer. Provide clean, well-documented code solutions with explanations.",
+    "analyst": "You are a data analyst. Provide structured, analytical responses with logical reasoning."
+}
+
+current_system_prompt = "default"
+streaming_enabled = True  # Toggle streaming on/off
 
 class ConversationMemory:
     def __init__(self):
@@ -85,10 +100,10 @@ class ConversationMemory:
 memory = ConversationMemory()
 
 def ask_agent(prompt, api_key):
-    """Ask AI with conversation context."""
+    """Ask AI with conversation context and streaming support."""
     # Add system message + conversation history + new prompt
     messages = [
-        {"role": "system", "content": "You are a helpful AI assistant. Always reply in complete sentences."}
+        {"role": "system", "content": SYSTEM_PROMPTS[current_system_prompt]}
     ]
     messages.extend(memory.get_context_messages())
     messages.append({"role": "user", "content": prompt.strip()})
@@ -108,26 +123,63 @@ def ask_agent(prompt, api_key):
                     "model": model,
                     "messages": messages,
                     "max_tokens": 500,
-                    "temperature": 0.7
+                    "temperature": 0.7,
+                    "stream": streaming_enabled
                 },
                 timeout=45,
+                stream=streaming_enabled
             )
 
             if response.status_code == 200:
-                data = response.json()
-                if "choices" in data and len(data["choices"]) > 0:
-                    content = data["choices"][0]["message"].get("content", "").strip()
-                    if content:
+                if streaming_enabled:
+                    # Handle streaming response
+                    print(f"\n💡 (🧠 Model: {model})\n", end='', flush=True)
+                    full_content = ""
+                    
+                    for line in response.iter_lines():
+                        if line:
+                            line_text = line.decode('utf-8')
+                            if line_text.startswith('data: '):
+                                data_str = line_text[6:]  # Remove 'data: ' prefix
+                                if data_str.strip() == '[DONE]':
+                                    break
+                                try:
+                                    data = json.loads(data_str)
+                                    if 'choices' in data and len(data['choices']) > 0:
+                                        delta = data['choices'][0].get('delta', {})
+                                        content_chunk = delta.get('content', '')
+                                        if content_chunk:
+                                            print(content_chunk, end='', flush=True)
+                                            full_content += content_chunk
+                                except json.JSONDecodeError:
+                                    continue
+                    
+                    print()  # New line after streaming
+                    
+                    if full_content:
                         # Store in memory
                         memory.add_message("user", prompt.strip())
-                        memory.add_message("assistant", content)
-                        return f"(🧠 Model: {model})\n{content}"
+                        memory.add_message("assistant", full_content)
+                        return None  # Already printed
                     else:
-                        print(f"⚠️ Empty response from {model}, trying next...")
+                        print(f"\n⚠️ Empty response from {model}, trying next...")
                         continue
                 else:
-                    print(f"⚠️ Unexpected format from {model}")
-                    continue
+                    # Handle non-streaming response
+                    data = response.json()
+                    if "choices" in data and len(data["choices"]) > 0:
+                        content = data["choices"][0]["message"].get("content", "").strip()
+                        if content:
+                            # Store in memory
+                            memory.add_message("user", prompt.strip())
+                            memory.add_message("assistant", content)
+                            return f"(🧠 Model: {model})\n{content}"
+                        else:
+                            print(f"⚠️ Empty response from {model}, trying next...")
+                            continue
+                    else:
+                        print(f"⚠️ Unexpected format from {model}")
+                        continue
 
             elif response.status_code == 429:
                 print(f"⚠️ Rate limit for {model}, retrying next model...")
@@ -175,6 +227,8 @@ def fetch_url(url):
 
 def handle_command(user_input):
     """Detect and execute local commands."""
+    global current_system_prompt
+    
     if user_input.startswith("/read "):
         path = user_input.split(" ", 1)[1].strip()
         return read_file(path)
@@ -189,6 +243,24 @@ def handle_command(user_input):
     elif user_input == "/clear":
         memory.clear()
         return "✅ Conversation memory cleared"
+    elif user_input == "/prompts":
+        output = "🎭 Available system prompts:\n" + "="*50 + "\n"
+        for name, prompt in SYSTEM_PROMPTS.items():
+            marker = "👉" if name == current_system_prompt else "  "
+            output += f"{marker} {name}: {prompt}\n"
+        return output
+    elif user_input.startswith("/prompt "):
+        prompt_name = user_input.split(" ", 1)[1].strip()
+        if prompt_name in SYSTEM_PROMPTS:
+            current_system_prompt = prompt_name
+            return f"✅ System prompt changed to: {prompt_name}\n💡 '{SYSTEM_PROMPTS[prompt_name]}'"
+        else:
+            return f"❌ Unknown prompt: {prompt_name}\nUse /prompts to see available options"
+    elif user_input.startswith("/custom "):
+        custom_prompt = user_input.split(" ", 1)[1].strip()
+        SYSTEM_PROMPTS["custom"] = custom_prompt
+        current_system_prompt = "custom"
+        return f"✅ Custom system prompt set:\n💡 '{custom_prompt}'"
     elif user_input == "/help":
         return (
             "🧩 Commands available:\n"
@@ -197,14 +269,19 @@ def handle_command(user_input):
             "/run <cmd>     – Run simple local command\n"
             "/history       – Show conversation history\n"
             "/clear         – Clear conversation memory\n"
+            "/prompts       – List available system prompts\n"
+            "/prompt <name> – Switch to a preset prompt\n"
+            "/custom <text> – Set custom system prompt\n"
             "/quit or exit  – Exit and save\n"
         )
     else:
         return None
 
 def main():
-    print("🤖 Task Agent + Memory + Tools (Cloud Mode)")
-    print("✅ Commands: /help /history /clear /read /fetch /run\n")
+    print("🤖 Task Agent + Memory + Tools + Custom Prompts + Streaming")
+    print("✅ Commands: /help /stream /prompts /prompt /custom /history /clear\n")
+    print(f"🎭 Current mode: {current_system_prompt}")
+    print(f"🌊 Streaming: {'enabled ✅' if streaming_enabled else 'disabled ❌'}\n")
 
     if not api_key:
         print("❌ Missing OPENROUTER_API_KEY in your .env file")
@@ -230,7 +307,8 @@ def main():
             # Otherwise, ask the AI
             print("\n⏳ Thinking...\n")
             answer = ask_agent(user_input, api_key)
-            print(f"\n💡 {answer}\n")
+            if answer:  # Only print if not already streamed
+                print(f"\n💡 {answer}\n")
     
     except KeyboardInterrupt:
         print("\n\n💾 Saving conversation...")
