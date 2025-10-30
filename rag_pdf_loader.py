@@ -9,7 +9,8 @@ load_dotenv()
 # --- CONFIG ---
 CHROMA_DB_PATH = "rag_db"
 COLLECTION_NAME = "pdf_knowledge"
-CHUNK_SIZE = 1000  # chars per text chunk
+CHUNK_SIZE = 300  # Smaller chunks for better retrieval
+CHUNK_OVERLAP = 50  # Overlap between chunks to preserve context
 
 # Load embedding model (downloads on first run, ~90MB)
 print("🔄 Loading embedding model...")
@@ -140,7 +141,7 @@ def list_indexed_documents():
         
         # Extract unique sources
         sources = set()
-        for metadata in items.get('metadatas', []):
+        for metadata in items.get('metadatas', []): # type: ignore
             if metadata and 'source' in metadata:
                 sources.add(metadata['source'])
         
