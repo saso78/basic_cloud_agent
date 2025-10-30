@@ -6,6 +6,8 @@ import json
 import sys
 from datetime import datetime
 from dotenv import load_dotenv
+import chromadb
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 api_key = os.getenv("OPENROUTER_API_KEY")
