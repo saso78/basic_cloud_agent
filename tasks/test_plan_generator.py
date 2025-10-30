@@ -1,3 +1,4 @@
+# tasks/test_plan_generator.py
 def create_test_plan(client, feature):
     prompt = f"Create a concise QA test plan for the feature: {feature}. Include test objectives, scenarios, and data points."
     response = client.chat.completions.create(
