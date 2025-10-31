@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 import chromadb
 from sentence_transformers import SentenceTransformer
 
+from rag_pdf_loader import query_knowledge
+
 load_dotenv()
 api_key = os.getenv("OPENROUTER_API_KEY")
 
@@ -101,10 +103,26 @@ class ConversationMemory:
         return output
 
 memory = ConversationMemory()
+def is_knowledge_query(prompt: str) -> bool:
+    """Simple heuristic to decide if RAG should be triggered."""
+    keywords = ["explain", "describe", "summarize", "who", "what", "when", "where", "why", "how", "define", "regulation", "policy", "rule", "procedure"]
+    return any(kw in prompt.lower() for kw in keywords)
 
 def ask_agent(prompt, api_key):
-    """Ask AI with conversation context and streaming support."""
-    # Add system message + conversation history + new prompt
+    """Ask AI with conversation context, RAG integration, and streaming support."""
+    
+    # 1️⃣ Optional: automatically enrich the prompt with RAG context
+    context_text = ""
+    if is_knowledge_query(prompt):
+        try:
+            print("📚 Querying knowledge base...")
+            context_text = query_knowledge(prompt)
+            if "📭" not in context_text and len(context_text.strip()) > 50:
+                prompt = f"Use this knowledge to answer accurately:\n{context_text}\n\nQuestion: {prompt}"
+        except Exception as e:
+            print(f"⚠️ RAG retrieval failed: {e}")
+
+    # 2️⃣ Build the message payload
     messages = [
         {"role": "system", "content": SYSTEM_PROMPTS[current_system_prompt]}
     ]
@@ -116,6 +134,7 @@ def ask_agent(prompt, api_key):
         "Content-Type": "application/json",
     }
 
+    # 3️⃣ Iterate through fallback models
     for model in MODELS:
         print(f"🔁 Trying model: {model}")
         try:
@@ -143,7 +162,7 @@ def ask_agent(prompt, api_key):
                         if line:
                             line_text = line.decode('utf-8')
                             if line_text.startswith('data: '):
-                                data_str = line_text[6:]  # Remove 'data: ' prefix
+                                data_str = line_text[6:]
                                 if data_str.strip() == '[DONE]':
                                     break
                                 try:
@@ -156,24 +175,20 @@ def ask_agent(prompt, api_key):
                                             full_content += content_chunk
                                 except json.JSONDecodeError:
                                     continue
-                    
-                    print()  # New line after streaming
+                    print()
                     
                     if full_content:
-                        # Store in memory
                         memory.add_message("user", prompt.strip())
                         memory.add_message("assistant", full_content)
-                        return None  # Already printed
+                        return None
                     else:
                         print(f"\n⚠️ Empty response from {model}, trying next...")
                         continue
                 else:
-                    # Handle non-streaming response
                     data = response.json()
                     if "choices" in data and len(data["choices"]) > 0:
                         content = data["choices"][0]["message"].get("content", "").strip()
                         if content:
-                            # Store in memory
                             memory.add_message("user", prompt.strip())
                             memory.add_message("assistant", content)
                             return f"(🧠 Model: {model})\n{content}"
@@ -200,6 +215,7 @@ def ask_agent(prompt, api_key):
             continue
 
     return "❌ All models are currently unavailable. Please try again later."
+
 
 def run_local_command(command):
     """Safely execute small local commands."""
@@ -268,6 +284,7 @@ def handle_command(user_input):
         return (
             "🧩 Commands available:\n"
             "/read <path>   – Read local file\n"
+            "/rag           – Query indexed pdf\n"
             "/fetch <url>   – Fetch content from the web\n"
             "/run <cmd>     – Run simple local command\n"
             "/history       – Show conversation history\n"
